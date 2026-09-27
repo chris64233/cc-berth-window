@@ -212,4 +212,128 @@ class ApiContractTest extends AbstractIntegrationTest {
         mockMvc.perform(get("/api/occupations").param("applicationNo", "WEB-6"))
                 .andExpect(jsonPath("$[0].startTime").value("2026-10-01T10:00:00Z"));
     }
+
+    private void submitAndApprove(String no, String eta, String etd, int tugs) throws Exception {
+        String body = """
+                {
+                  "applicationNo": "%s",
+                  "vesselCode": "V-%s",
+                  "vesselType": "FEEDER",
+                  "eta": "%s",
+                  "etd": "%s",
+                  "draft": 10.00,
+                  "requiredBerthType": "CONTAINER",
+                  "requiredTugs": %d
+                }
+                """.formatted(no, no, eta, etd, tugs);
+        mockMvc.perform(post("/api/applications").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated());
+        mockMvc.perform(post("/api/applications/" + no + "/approve"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void swapFreezeAndConfirm_happyPath() throws Exception {
+        // 第二个泊位
+        mockMvc.perform(post("/api/resources/berths").contentType(MediaType.APPLICATION_JSON).content("""
+                {"code":"WB2","name":"WB2 泊位","berthType":"CONTAINER",
+                 "acceptedVesselTypes":["FEEDER"],"maxDraft":13.00,"simultaneousCapacity":1}"""))
+                .andExpect(status().isCreated());
+
+        submitAndApprove("WEB-S1", "2026-10-01T10:00:00Z", "2026-10-01T12:00:00Z", 0);
+        submitAndApprove("WEB-S2", "2026-10-01T14:00:00Z", "2026-10-01T16:00:00Z", 0);
+
+        String proposal = """
+                {"proposalNo":"SWP-1","applicationANo":"WEB-S1","applicationBNo":"WEB-S2"}""";
+        mockMvc.perform(post("/api/swaps").contentType(MediaType.APPLICATION_JSON).content(proposal))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("PROPOSED"))
+                .andExpect(jsonPath("$.applicationANo").value("WEB-S1"))
+                .andExpect(jsonPath("$.aEta").value("2026-10-01T10:00:00Z"))
+                .andExpect(jsonPath("$.bEta").value("2026-10-01T14:00:00Z"));
+
+        mockMvc.perform(post("/api/swaps/SWP-1/confirm"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.applicationA.eta").value("2026-10-01T14:00:00Z"))
+                .andExpect(jsonPath("$.applicationB.eta").value("2026-10-01T10:00:00Z"));
+
+        // 重复确认幂等：不会交换第二次
+        mockMvc.perform(post("/api/swaps/SWP-1/confirm"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.applicationA.eta").value("2026-10-01T14:00:00Z"));
+
+        mockMvc.perform(get("/api/change-history").param("applicationNo", "WEB-S1"))
+                .andExpect(jsonPath("$[*].action").value(
+                        org.hamcrest.Matchers.hasItem("SWAPPED")));
+    }
+
+    @Test
+    void swapConfirmFailure_returns422AndKeepsOriginalArrangements() throws Exception {
+        mockMvc.perform(post("/api/resources/berths").contentType(MediaType.APPLICATION_JSON).content("""
+                {"code":"WB2","name":"WB2 泊位","berthType":"CONTAINER",
+                 "acceptedVesselTypes":["FEEDER"],"maxDraft":13.00,"simultaneousCapacity":1}"""))
+                .andExpect(status().isCreated());
+        // 10-02 只有水深 9m 的窗口：小吃水船可安排，大吃水船交换过来则潮汐不满足
+        mockMvc.perform(post("/api/resources/tide-windows")
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                {"berthType":"CONTAINER","windowStart":"2026-10-02T09:00:00Z",
+                 "windowEnd":"2026-10-02T21:00:00Z","availableDepth":9.00}"""))
+                .andExpect(status().isCreated());
+
+        // S3 吃水 10m（setUp 的 10-01 窗口水深 12m 满足）
+        submitAndApprove("WEB-S3", "2026-10-01T10:00:00Z", "2026-10-01T11:00:00Z", 0);
+        // S4 吃水 8m，在 10-02 的 9m 窗口下可批准
+        String s4 = """
+                {
+                  "applicationNo": "WEB-S4",
+                  "vesselCode": "V-WEB-S4",
+                  "vesselType": "FEEDER",
+                  "eta": "2026-10-02T10:00:00Z",
+                  "etd": "2026-10-02T12:00:00Z",
+                  "draft": 8.00,
+                  "requiredBerthType": "CONTAINER",
+                  "requiredTugs": 0
+                }
+                """;
+        mockMvc.perform(post("/api/applications").contentType(MediaType.APPLICATION_JSON).content(s4))
+                .andExpect(status().isCreated());
+        mockMvc.perform(post("/api/applications/WEB-S4/approve")).andExpect(status().isOk());
+
+        mockMvc.perform(post("/api/swaps").contentType(MediaType.APPLICATION_JSON).content("""
+                {"proposalNo":"SWP-2","applicationANo":"WEB-S3","applicationBNo":"WEB-S4"}"""))
+                .andExpect(status().isCreated());
+
+        // 确认：S3 交换到 10-02 后吃水 10m > 水深 9m -> 422
+        mockMvc.perform(post("/api/swaps/SWP-2/confirm"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("TIDE_WINDOW_UNAVAILABLE"))
+                .andExpect(jsonPath("$.status").value(422));
+
+        // 方案已落库 FAILED，双方原安排保持可用
+        mockMvc.perform(get("/api/swaps/SWP-2"))
+                .andExpect(jsonPath("$.status").value("FAILED"))
+                .andExpect(jsonPath("$.failureCode").value("TIDE_WINDOW_UNAVAILABLE"))
+                .andExpect(jsonPath("$.failureReason").exists());
+        mockMvc.perform(get("/api/applications/WEB-S3"))
+                .andExpect(jsonPath("$.eta").value("2026-10-01T10:00:00Z"))
+                .andExpect(jsonPath("$.status").value("APPROVED"));
+        mockMvc.perform(get("/api/applications/WEB-S4"))
+                .andExpect(jsonPath("$.eta").value("2026-10-02T10:00:00Z"))
+                .andExpect(jsonPath("$.status").value("APPROVED"));
+
+        // 重复确认：返回同一失败结论（幂等）
+        mockMvc.perform(post("/api/swaps/SWP-2/confirm"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("TIDE_WINDOW_UNAVAILABLE"));
+    }
+
+    @Test
+    void swapFreeze_sameApplication_returns400() throws Exception {
+        submitAndApprove("WEB-S5", "2026-10-01T10:00:00Z", "2026-10-01T12:00:00Z", 0);
+        mockMvc.perform(post("/api/swaps").contentType(MediaType.APPLICATION_JSON).content("""
+                {"proposalNo":"SWP-3","applicationANo":"WEB-S5","applicationBNo":"WEB-S5"}"""))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("SWAP_SAME_APPLICATION"));
+    }
 }

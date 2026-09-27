@@ -59,7 +59,16 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
     public ResponseEntity<ErrorResponse> handleStale(ObjectOptimisticLockingFailureException ex) {
         return build(ErrorCode.JUDGMENT_STALE,
-                "审批所依据的数据已被修改，请基于最新潮汐与申请数据重新发起审批");
+                "审批/互换所依据的潮汐或申请数据已被修改，请基于最新数据重新发起");
+    }
+
+    /**
+     * 悲观锁等待超时：方案/申请/资源行正被其它事务处理，调用方可安全重试。
+     */
+    @ExceptionHandler(org.springframework.dao.CannotAcquireLockException.class)
+    public ResponseEntity<ErrorResponse> handleLockTimeout(
+            org.springframework.dao.CannotAcquireLockException ex) {
+        return build(ErrorCode.JUDGMENT_STALE, "相关安排正被其它事务处理，请稍后重试");
     }
 
     /**

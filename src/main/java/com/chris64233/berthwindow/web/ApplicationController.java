@@ -67,4 +67,10 @@ public class ApplicationController {
         return DtoMapper.application(
                 service.reschedule(applicationNo, request.newEta(), request.newEtd()));
     }
+
+    /** 取消：已批准且未开始作业的申请释放全部占用；重复取消幂等。 */
+    @PostMapping("/{applicationNo}/cancel")
+    public ApplicationResponse cancel(@PathVariable String applicationNo) {
+        return DtoMapper.application(service.cancel(applicationNo));
+    }
 }

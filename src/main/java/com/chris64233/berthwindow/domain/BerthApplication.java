@@ -96,6 +96,20 @@ public class BerthApplication {
         this.etd = etd;
     }
 
+    /** 取消申请：已批准申请取消时由服务层先释放全部占用资源。 */
+    public void cancel() {
+        this.status = ApplicationStatus.CANCELLED;
+        this.assignedBerthId = null;
+    }
+
+    /** 互换确认成功：占用对方的泊位与时段。 */
+    public void applySwap(Long newBerthId, Instant newEta, Instant newEtd) {
+        this.assignedBerthId = newBerthId;
+        this.eta = newEta;
+        this.etd = newEtd;
+        this.status = ApplicationStatus.APPROVED;
+    }
+
     public Long getId() {
         return id;
     }

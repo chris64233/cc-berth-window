@@ -27,4 +27,16 @@ public interface TugAssignmentRepository extends JpaRepository<TugAssignment, Lo
             + "where a.actionTime in :times and a.applicationId <> :applicationId")
     List<Long> findBusyTugIdsExcluding(@Param("times") Collection<Instant> times,
                                        @Param("applicationId") Long applicationId);
+
+    /** 互换时排除互换双方自身占用后的忙时拖轮 id（双方拖轮安排将被重写） */
+    @Query("select distinct a.tugId from TugAssignment a "
+            + "where a.actionTime in :times and a.applicationId not in :excludedApplicationIds")
+    List<Long> findBusyTugIdsExcludingBoth(@Param("times") Collection<Instant> times,
+                                           @Param("excludedApplicationIds") Collection<Long> excludedApplicationIds);
+
+    /** 互换时查询排除双方后，在给定时刻集合上的全部占用明细（拖轮-时刻） */
+    @Query("select a from TugAssignment a "
+            + "where a.actionTime in :times and a.applicationId not in :excludedApplicationIds")
+    List<TugAssignment> findAssignmentsExcludingBoth(@Param("times") Collection<Instant> times,
+                                                     @Param("excludedApplicationIds") Collection<Long> excludedApplicationIds);
 }

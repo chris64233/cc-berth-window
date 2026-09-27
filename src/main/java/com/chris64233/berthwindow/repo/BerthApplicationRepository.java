@@ -19,4 +19,9 @@ public interface BerthApplicationRepository extends JpaRepository<BerthApplicati
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select a from BerthApplication a where a.applicationNo = :applicationNo")
     Optional<BerthApplication> findWithLockByApplicationNo(@Param("applicationNo") String applicationNo);
+
+    /** 互换确认时按 id 锁定申请行（始终先锁小 id，避免跨事务死锁） */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select a from BerthApplication a where a.id = :id")
+    Optional<BerthApplication> findWithLockById(@Param("id") Long id);
 }
