@@ -87,6 +87,9 @@ public class BerthApplication {
     }
 
     public void approve(Long berthId) {
+        if (this.status == ApplicationStatus.CANCELLED) {
+            throw new IllegalStateException("申请已取消，不能再次审批");
+        }
         this.assignedBerthId = berthId;
         this.status = ApplicationStatus.APPROVED;
     }
@@ -94,6 +97,23 @@ public class BerthApplication {
     public void applyNewSchedule(Instant eta, Instant etd) {
         this.eta = eta;
         this.etd = etd;
+    }
+
+    /** 批准后、作业开始前取消：释放泊位与拖轮占用。 */
+    public void cancel() {
+        this.status = ApplicationStatus.CANCELLED;
+        this.assignedBerthId = null;
+    }
+
+    /**
+     * 互换确认：在对方原时段、对方原泊位上重新安排本船。
+     * 调用方必须已在同一事务内完成交换后的全部资源校验。
+     */
+    public void applySwapArrangement(Long newBerthId, Instant newEta, Instant newEtd) {
+        this.assignedBerthId = newBerthId;
+        this.eta = newEta;
+        this.etd = newEtd;
+        this.status = ApplicationStatus.APPROVED;
     }
 
     public Long getId() {

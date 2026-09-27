@@ -1,6 +1,7 @@
 package com.chris64233.berthwindow.repo;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -15,9 +16,14 @@ public interface BerthOccupationRepository extends JpaRepository<BerthOccupation
 
     List<BerthOccupation> findByApplicationId(Long applicationId);
 
+    List<BerthOccupation> findByApplicationIdIn(Collection<Long> applicationIds);
+
     List<BerthOccupation> findAllByOrderByStartTimeAsc();
 
     void deleteByApplicationId(Long applicationId);
+
+    /** 互换确认：一次性删除双方原泊位占用 */
+    void deleteByApplicationIdIn(Collection<Long> applicationIds);
 
     /**
      * 统计与 [start, end) 重叠的占用数量（半开区间，端点相接不算重叠）。
@@ -37,4 +43,13 @@ public interface BerthOccupationRepository extends JpaRepository<BerthOccupation
                                    @Param("applicationId") Long applicationId,
                                    @Param("start") Instant start,
                                    @Param("end") Instant end);
+
+    /** 互换确认时排除互换双方占用后的重叠数量（双方原占用将在同一事务内切换） */
+    @Query("select count(o) from BerthOccupation o where o.berthId = :berthId "
+            + "and o.applicationId not in :excludedApplicationIds "
+            + "and o.startTime < :end and o.endTime > :start")
+    long countOverlappingExcludingApplications(@Param("berthId") Long berthId,
+                                               @Param("excludedApplicationIds") Collection<Long> excludedApplicationIds,
+                                               @Param("start") Instant start,
+                                               @Param("end") Instant end);
 }

@@ -1,7 +1,8 @@
 # cc-berth-window
 
 港口泊位窗口服务：在**潮汐**与**作业资源（泊位、拖轮）**约束下，受理船舶泊位窗口申请、
-审批占用与整体改期，并提供资源占用与变更历史查询。
+审批占用、整体改期、批准后取消以及**两艘已批准船舶互换泊位时段**，
+并提供资源占用与变更历史查询。
 
 ## 开发环境
 
@@ -30,7 +31,10 @@
 | `BerthApplication` 申请 | 业务申请号、船型/吃水、预计靠离泊时间、所需泊位类型、所需拖轮数、状态与版本号 |
 | `BerthOccupation` 泊位占用 | 一次批准对应一段连续泊位时间（半开区间 `[start,end)`） |
 | `TugAssignment` 拖轮占用 | 一次靠泊/离泊对某艘拖轮在某一时刻的占用 |
-| `ChangeHistory` 变更历史 | 提交 / 审批 / 改期记录及明细 |
+| `BerthSwapProposal` 互换方案 | 业务号、双方申请、状态（PROPOSED/CONFIRMED/FAILED）、冻结快照与失败原因 |
+| `BerthSwapSide` 互换方快照 | 一方互换前/后泊位与时段、申请与目标泊位资料版本、拟用拖轮集合 |
+| `TideWindowSnapshotEntity` 潮汐快照 | 冻结的潮汐窗口内容与版本号 |
+| `ChangeHistory` 变更历史 | 提交 / 审批 / 改期 / 取消 / 互换提议 / 互换成功 / 互换失败记录及明细 |
 
 ## 主要业务规则
 
@@ -48,17 +52,35 @@
    改期时先用新时间完成潮汐、泊位容量、拖轮的全部校验，全部满足后才在同一事务内
    删除旧占用并写入新占用；**失败则事务回滚，原泊位时间与拖轮安排原样保留**。
 6. **重叠判定**：泊位时间采用半开区间 `[start,end)`，首尾相接的两段占用不算重叠。
+7. **泊位时段互换（先冻结、后确认，失败保留原安排）**：两艘已批准且未开始作业的船舶可发起
+   互换。互换**不是交换两个时间字段**——提议时冻结双方泊位、时间、潮汐资料（含版本号）
+   与拖轮安排，并立即按交换后的条件重新做泊位准入、潮汐、泊位容量与拖轮校验；
+   确认时在独立事务内依据冻结快照**重新校验**，全部满足才在同一事务内
+   「删旧占用 → 写新占用 → 更新两份申请」原子切换；**任一方不满足或依据数据已变化，
+   则确认整体失败，方案置 FAILED 并记录失败原因，原两份批准安排与资源占用原样保留**。
+8. **互换方案随版本变化失效**：方案冻结后，任一方改期、取消（均提升申请 `@Version`），
+   或涉及泊位类型的任一潮汐窗口新增/删除/更新，确认时快照版本比对失败（`SWAP_STALE`），
+   不会基于旧资料完成交换。
+9. **取消**：已批准且未开始作业的申请可取消，单事务内释放泊位占用与拖轮安排（状态
+   CANCELLED，不可重复审批）；取消同样令冻结过该申请的在途互换方案失效。
 
 ### 容量与唯一性为何不只靠进程内判断
 
-- **泊位容量**：审批/改期对泊位行执行 `SELECT … FOR UPDATE`（悲观写锁），
-  同一泊位的并发容量判断在数据库层串行化；始终按 id 升序加锁以避免死锁。
+- **泊位容量**：审批/改期/互换对泊位行执行 `SELECT … FOR UPDATE`（悲观写锁），
+  同一泊位的并发容量判断在数据库层串行化；涉及两个泊位/两份申请时始终按 id 升序加锁以避免死锁。
 - **拖轮容量**：锁定拖轮池行做容量判断，并由数据库唯一约束
   `uk_tug_time(tug_id, action_time)` 作最终硬保护——并发争抢同一艘拖轮同一时刻时，
   后提交者必然触发约束冲突并整体回滚。
-- **幂等**：`berth_application.application_no` 数据库唯一约束。
+- **幂等**：`berth_application.application_no` 与
+  `berth_swap_proposal.swap_no` 数据库唯一约束。
 - **单一占用**：`uk_occupation_application(application_id)` 保证一次审批至多一条泊位占用。
-- **潮汐/申请一致性**：潮汐窗口与申请实体均带 `@Version`，审批期间数据变化即乐观锁失败。
+- **潮汐/申请一致性**：潮汐窗口、申请、泊位均带 `@Version`，审批/改期/互换确认期间
+  数据变化即乐观锁失败或快照版本不一致；互换还会把冻结时的潮汐窗口内容与版本号
+  持久化为快照，确认时逐项比对（含新增窗口检测）。
+- **互换确认并发**：先对方案行加写锁、再按 id 升序锁两份申请行，
+  与并发的改期/取消/再次确认在数据库层串行；终态方案（CONFIRMED/FAILED）的重复确认
+  直接返回既有结果，不会重复交换或重复释放资源。确认失败留痕在失败事务回滚后
+  以独立事务写入，避免与回滚一起丢失。
 
 ## REST API
 
@@ -82,6 +104,15 @@
 | GET  | `/api/applications`、`/api/applications/{applicationNo}` | 查询申请 |
 | POST | `/api/applications/{applicationNo}/approve` | 审批（泊位与拖轮原子占用） |
 | POST | `/api/applications/{applicationNo}/reschedule` | 整体改期（成功才释放原窗口） |
+| POST | `/api/applications/{applicationNo}/cancel` | 取消批准安排（释放泊位/拖轮，并使在途互换失效） |
+
+两艘已批准船舶互换泊位时段：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/swaps` | 提议互换（按 `swapNo` 幂等；冻结双方泊位/时间/潮汐/拖轮并按交换后条件预校验） |
+| POST | `/api/swaps/{swapNo}/confirm` | 确认互换（快照重校验通过才原子切换；失败置 FAILED 且原安排保留） |
+| GET  | `/api/swaps`、`/api/swaps/{swapNo}` | 查询互换方案（含状态与失败原因） |
 
 查询：
 
@@ -117,6 +148,15 @@ curl -X POST localhost:8080/api/applications/APP-001/approve
 curl -X POST localhost:8080/api/applications/APP-001/reschedule \
   -H 'Content-Type: application/json' \
   -d '{"newEta":"2026-10-02T10:00:00Z","newEtd":"2026-10-02T20:00:00Z"}'
+
+# 5) 两艘已批准船舶互换泊位时段（先提议冻结、再确认）
+curl -X POST localhost:8080/api/swaps -H 'Content-Type: application/json' -d '{
+  "swapNo":"SWAP-001","applicationANo":"APP-001","applicationBNo":"APP-002"}'
+curl -X POST localhost:8080/api/swaps/SWAP-001/confirm
+# 任一方改期/取消或潮汐更新后再确认 -> 409 SWAP_STALE，原两份安排保留
+
+# 6) 批准后、作业开始前取消（释放占用，并使在途互换方案失效）
+curl -X POST localhost:8080/api/applications/APP-001/cancel
 ```
 
 ## 统一错误响应
@@ -142,18 +182,30 @@ curl -X POST localhost:8080/api/applications/APP-001/reschedule \
 | `BERTH_CAPACITY_EXCEEDED` | 409 | 泊位同时作业能力已满 |
 | `INSUFFICIENT_TUGS` | 409 | 拖轮余量不足（含并发争抢唯一约束兜底） |
 | `TIDE_WINDOW_UNAVAILABLE` | 422 | 靠/离泊时刻无满足吃水的潮汐窗口 |
-| `WINDOW_ALREADY_STARTED` | 409 | 已开始作业的申请不能改期 |
-| `JUDGMENT_STALE` | 409 | 审批依据的潮汐/申请数据在提交前已变化 |
-| `DUPLICATE_BUSINESS_KEY` | 409 | 业务号重复且内容不一致 / 唯一约束冲突 |
+| `WINDOW_ALREADY_STARTED` | 409 | 已开始作业的申请不能改期 / 取消 / 互换 |
+| `JUDGMENT_STALE` | 409 | 审批依据的潮汐数据在提交前已变化 |
+| `DUPLICATE_BUSINESS_KEY` | 409 | 业务号重复且内容/双方不一致 / 唯一约束冲突 |
+| `SWAP_NOT_FOUND` | 404 | 互换方案不存在 |
+| `SWAP_INVALID_PAIR` | 422 | 互换双方相同，或至少一方未批准/已取消/无泊位安排 |
+| `SWAP_STALE` | 409 | 方案冻结后申请改期/取消、潮汐资料更新等导致版本变化，或对已终结方案再次操作 |
 
 ## 自动化测试
 
-`./mvnw clean test` 共 32 个测试：
+`./mvnw clean test` 共 54 个测试：
 
 - `BerthWindowBusinessRulesTest`（18 个）：幂等提交、泊位+拖轮原子占用、任一不足整体拒绝、
   潮汐吃水/时刻约束、多泊位选择、改期成功释放旧窗口、改期失败（潮汐/拖轮/泊位）保留原安排、
   查询与参数校验。
+- `BerthSwapBusinessRulesTest`（16 个）：提议冻结双方泊位/时间/潮汐版本/拖轮并按交换后条件
+  预校验（泊位准入、潮汐、容量、拖轮不满足即拒绝）、同号同双方幂等/同号不同双方冲突、
+  确认成功原子互换泊位时段与拖轮、确认幂等不重复交换、确认失败（拖轮被第三方占走）原两份
+  安排与占用 id 原样保留并记录失败原因、改期/取消/潮汐更新后确认判 `SWAP_STALE`、
+  取消释放占用、互换前后安排与失败原因历史留痕。
 - `BerthWindowConcurrencyTest`（6 个，真实多线程）：5 路并发争抢容量为 2 的泊位、
   3 路并发超订拖轮（验证 `uk_tug_time` 兜底）、潮汐在审批读窗口后被修改触发乐观锁失败、
   同申请并发审批恰好成功一次、同业务号并发提交只生成一条申请。
-- `ApiContractTest`（7 个，MockMvc）：申请/审批/改期/查询接口契约与统一错误响应结构。
+- `BerthSwapConcurrencyTest`（3 个，真实多线程）：4 路并发确认同一方案恰好交换一次且不重复
+  释放资源（占用/拖轮艘次/成功历史各仅一份）、确认与改期竞速下最终状态始终自洽（要么交换
+  落地要么改期生效，绝无半交换）、同 `swapNo` 并发提议只生成一份方案。
+- `ApiContractTest`（10 个，MockMvc）：申请/审批/改期/取消/互换提议/互换确认/互换失败/查询
+  接口契约与统一错误响应结构。

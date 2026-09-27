@@ -29,7 +29,10 @@ class ApiContractTest extends AbstractIntegrationTest {
     void setUp() {
         service.createBerth("WB", "WB 泊位", "CONTAINER",
                 java.util.Set.of("FEEDER"), new BigDecimal("13.00"), 1);
+        service.createBerth("WB2B", "WB2B 泊位", "CONTAINER",
+                java.util.Set.of("FEEDER"), new BigDecimal("13.00"), 1);
         service.createTug("WT", "WT 拖轮");
+        service.createTug("WT2", "WT2 拖轮");
         service.createTideWindow("CONTAINER",
                 java.time.Instant.parse("2026-10-01T09:00:00Z"),
                 java.time.Instant.parse("2026-10-01T21:00:00Z"),
@@ -211,5 +214,122 @@ class ApiContractTest extends AbstractIntegrationTest {
                 .andExpect(jsonPath("$.status").value("APPROVED"));
         mockMvc.perform(get("/api/occupations").param("applicationNo", "WEB-6"))
                 .andExpect(jsonPath("$[0].startTime").value("2026-10-01T10:00:00Z"));
+    }
+
+    @Test
+    void swapProposeAndConfirm_swapsBerthWindows() throws Exception {
+        submitAndApprove("WEB-SA", "2026-10-01T10:00:00Z", "2026-10-01T12:00:00Z", 1);
+        submitAndApprove("WEB-SB", "2026-10-01T12:00:00Z", "2026-10-01T20:00:00Z", 1);
+
+        String propose = """
+                {
+                  "swapNo": "WEB-SWAP-1",
+                  "applicationANo": "WEB-SA",
+                  "applicationBNo": "WEB-SB"
+                }
+                """;
+        mockMvc.perform(post("/api/swaps").contentType(MediaType.APPLICATION_JSON).content(propose))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.swapNo").value("WEB-SWAP-1"))
+                .andExpect(jsonPath("$.status").value("PROPOSED"));
+
+        // 幂等：同号同双方重复提议返回同一方案
+        mockMvc.perform(post("/api/swaps").contentType(MediaType.APPLICATION_JSON).content(propose))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("PROPOSED"));
+
+        mockMvc.perform(post("/api/swaps/WEB-SWAP-1/confirm"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CONFIRMED"))
+                .andExpect(jsonPath("$.failureReason").doesNotExist());
+
+        // 双方时间已互换
+        mockMvc.perform(get("/api/applications/WEB-SA"))
+                .andExpect(jsonPath("$.eta").value("2026-10-01T12:00:00Z"))
+                .andExpect(jsonPath("$.etd").value("2026-10-01T20:00:00Z"));
+        mockMvc.perform(get("/api/applications/WEB-SB"))
+                .andExpect(jsonPath("$.eta").value("2026-10-01T10:00:00Z"))
+                .andExpect(jsonPath("$.etd").value("2026-10-01T12:00:00Z"));
+
+        // 互换前后安排均有历史
+        mockMvc.perform(get("/api/change-history").param("applicationNo", "WEB-SA"))
+                .andExpect(jsonPath("$[*].action").value(org.hamcrest.Matchers.containsInAnyOrder(
+                        "SUBMITTED", "APPROVED", "SWAP_PROPOSED", "SWAP_CONFIRMED")));
+
+        // 重复确认幂等
+        mockMvc.perform(post("/api/swaps/WEB-SWAP-1/confirm"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CONFIRMED"));
+    }
+
+    @Test
+    void swapConfirmFailure_marksFailedAndKeepsOriginalArrangements() throws Exception {
+        submitAndApprove("WEB-FA", "2026-10-01T10:00:00Z", "2026-10-01T12:00:00Z", 1);
+        submitAndApprove("WEB-FB", "2026-10-01T12:00:00Z", "2026-10-01T20:00:00Z", 1);
+        String propose = """
+                {
+                  "swapNo": "WEB-SWAP-F",
+                  "applicationANo": "WEB-FA",
+                  "applicationBNo": "WEB-FB"
+                }
+                """;
+        mockMvc.perform(post("/api/swaps").contentType(MediaType.APPLICATION_JSON).content(propose))
+                .andExpect(status().isCreated());
+
+        // 冻结后改期 WEB-FA -> 方案版本失效
+        mockMvc.perform(post("/api/applications/WEB-FA/reschedule")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"newEta":"2026-10-01T10:30:00Z","newEtd":"2026-10-01T11:30:00Z"}
+                                """))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(post("/api/swaps/WEB-SWAP-F/confirm"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("SWAP_STALE"))
+                .andExpect(jsonPath("$.message").exists());
+
+        mockMvc.perform(get("/api/swaps/WEB-SWAP-F"))
+                .andExpect(jsonPath("$.status").value("FAILED"))
+                .andExpect(jsonPath("$.failureReason").exists());
+        // WEB-FB 原安排保留
+        mockMvc.perform(get("/api/applications/WEB-FB"))
+                .andExpect(jsonPath("$.eta").value("2026-10-01T12:00:00Z"))
+                .andExpect(jsonPath("$.status").value("APPROVED"));
+        mockMvc.perform(get("/api/change-history").param("applicationNo", "WEB-FB"))
+                .andExpect(jsonPath("$[*].action").value(
+                        org.hamcrest.Matchers.hasItem("SWAP_FAILED")));
+    }
+
+    @Test
+    void cancelApprovedApplication_releasesWindow() throws Exception {
+        submitAndApprove("WEB-CA", "2026-10-01T10:00:00Z", "2026-10-01T20:00:00Z", 0);
+
+        mockMvc.perform(post("/api/applications/WEB-CA/cancel"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CANCELLED"));
+
+        mockMvc.perform(get("/api/occupations").param("applicationNo", "WEB-CA"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+    }
+
+    private void submitAndApprove(String no, String eta, String etd, int requiredTugs) throws Exception {
+        String body = """
+                {
+                  "applicationNo": "%s",
+                  "vesselCode": "V-%s",
+                  "vesselType": "FEEDER",
+                  "eta": "%s",
+                  "etd": "%s",
+                  "draft": 10.00,
+                  "requiredBerthType": "CONTAINER",
+                  "requiredTugs": %d
+                }
+                """.formatted(no, no, eta, etd, requiredTugs);
+        mockMvc.perform(post("/api/applications").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated());
+        mockMvc.perform(post("/api/applications/" + no + "/approve"))
+                .andExpect(status().isOk());
     }
 }

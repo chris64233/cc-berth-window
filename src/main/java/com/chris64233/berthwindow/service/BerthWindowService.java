@@ -217,9 +217,9 @@ public class BerthWindowService {
         BerthApplication application = applicationRepository.findWithLockByApplicationNo(applicationNo)
                 .orElseThrow(() -> new ApiException(ErrorCode.APPLICATION_NOT_FOUND,
                         "申请不存在: " + applicationNo));
-        if (application.getStatus() == com.chris64233.berthwindow.domain.ApplicationStatus.APPROVED) {
+        if (application.getStatus() != com.chris64233.berthwindow.domain.ApplicationStatus.PENDING) {
             throw new ApiException(ErrorCode.APPLICATION_ALREADY_APPROVED,
-                    "申请 " + applicationNo + " 已审批通过");
+                    "申请 " + applicationNo + " 已审批或已取消，不能再次审批");
         }
 
         Instant eta = application.getEta();
@@ -409,6 +409,50 @@ public class BerthWindowService {
                 HistoryAction.RESCHEDULED,
                 "改期成功：" + oldEta + " ~ " + oldEtd + "  ->  " + newEta + " ~ " + newEtd
                         + "；新拖轮安排 " + chosenTugs.size() + " 艘；原窗口已释放",
+                Instant.now()));
+        return application;
+    }
+
+    // ---------------- 取消（释放占用；版本提升使在途互换方案失效） ----------------
+
+    /**
+     * 取消已批准且尚未开始作业的申请：在单事务内删除泊位占用与拖轮安排并置为 CANCELLED。
+     * 申请实体的 {@code @Version} 随之提升，任何冻结过该申请的互换方案在确认重校验时
+     * 都会因版本变化判定失效（{@code SWAP_STALE}），不会基于旧安排完成交换。
+     */
+    @Transactional
+    public BerthApplication cancel(String applicationNo) {
+        BerthApplication application = applicationRepository.findWithLockByApplicationNo(applicationNo)
+                .orElseThrow(() -> new ApiException(ErrorCode.APPLICATION_NOT_FOUND,
+                        "申请不存在: " + applicationNo));
+        if (application.getStatus() == com.chris64233.berthwindow.domain.ApplicationStatus.CANCELLED) {
+            return application;
+        }
+        if (application.getStatus() != com.chris64233.berthwindow.domain.ApplicationStatus.APPROVED) {
+            throw new ApiException(ErrorCode.APPLICATION_NOT_APPROVED,
+                    "申请 " + applicationNo + " 尚未审批通过，不能取消");
+        }
+        Instant oldEta = application.getEta();
+        if (!Instant.now().isBefore(oldEta)) {
+            throw new ApiException(ErrorCode.WINDOW_ALREADY_STARTED,
+                    "原窗口已于 " + oldEta + " 开始作业，不能取消");
+        }
+
+        Long appId = application.getId();
+        occupationRepository.deleteByApplicationId(appId);
+        occupationRepository.flush();
+        assignmentRepository.deleteByApplicationId(appId);
+        assignmentRepository.flush();
+
+        Instant eta = application.getEta();
+        Instant etd = application.getEtd();
+        Long berthId = application.getAssignedBerthId();
+        application.cancel();
+
+        historyRepository.save(new ChangeHistory(appId, applicationNo,
+                HistoryAction.CANCELLED,
+                "已取消批准安排：泊位 " + berthId + "，时段 " + eta + " ~ " + etd
+                        + "；泊位与拖轮占用已释放",
                 Instant.now()));
         return application;
     }

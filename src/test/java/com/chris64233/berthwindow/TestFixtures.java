@@ -56,4 +56,12 @@ public final class TestFixtures {
         return service.submit(no, "V-" + no, VESSEL_TYPE, ETA, ETD, draft,
                 CONTAINER, tugsRequired);
     }
+
+    /** 使用指定靠/离泊时间与默认船型提交申请 */
+    public static com.chris64233.berthwindow.domain.BerthApplication submit(
+            BerthWindowService service, String no, int tugsRequired, BigDecimal draft,
+            Instant eta, Instant etd) {
+        return service.submit(no, "V-" + no, VESSEL_TYPE, eta, etd, draft,
+                CONTAINER, tugsRequired);
+    }
 }

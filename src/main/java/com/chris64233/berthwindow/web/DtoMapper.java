@@ -6,6 +6,7 @@ import java.util.Map;
 import com.chris64233.berthwindow.domain.Berth;
 import com.chris64233.berthwindow.domain.BerthApplication;
 import com.chris64233.berthwindow.domain.BerthOccupation;
+import com.chris64233.berthwindow.domain.BerthSwapProposal;
 import com.chris64233.berthwindow.domain.ChangeHistory;
 import com.chris64233.berthwindow.domain.TideWindow;
 import com.chris64233.berthwindow.domain.Tug;
@@ -14,6 +15,7 @@ import com.chris64233.berthwindow.web.dto.ApplicationResponse;
 import com.chris64233.berthwindow.web.dto.BerthResponse;
 import com.chris64233.berthwindow.web.dto.HistoryResponse;
 import com.chris64233.berthwindow.web.dto.OccupationResponse;
+import com.chris64233.berthwindow.web.dto.SwapProposalResponse;
 import com.chris64233.berthwindow.web.dto.TideWindowResponse;
 import com.chris64233.berthwindow.web.dto.TugAssignmentResponse;
 import com.chris64233.berthwindow.web.dto.TugResponse;
@@ -69,6 +71,12 @@ public final class DtoMapper {
     public static HistoryResponse history(ChangeHistory h) {
         return new HistoryResponse(h.getId(), h.getApplicationId(), h.getApplicationNo(),
                 h.getAction(), h.getDetail(), h.getOccurredAt());
+    }
+
+    public static SwapProposalResponse swapProposal(BerthSwapProposal p) {
+        return new SwapProposalResponse(p.getId(), p.getSwapNo(), p.getApplicationANo(),
+                p.getApplicationBNo(), p.getStatus(), p.getFailureReason(),
+                p.getCreatedAt(), p.getConfirmedAt(), p.getVersion());
     }
 
     public static List<OccupationResponse> occupations(List<BerthOccupation> occupations,

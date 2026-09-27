@@ -22,6 +22,11 @@ public abstract class AbstractIntegrationTest {
             jdbcTemplate.execute("TRUNCATE TABLE tug_assignment");
             jdbcTemplate.execute("TRUNCATE TABLE berth_occupation");
             jdbcTemplate.execute("TRUNCATE TABLE change_history");
+            jdbcTemplate.execute("TRUNCATE TABLE berth_swap_side_tug");
+            jdbcTemplate.execute("TRUNCATE TABLE berth_swap_side_vessel_type");
+            jdbcTemplate.execute("TRUNCATE TABLE berth_swap_side");
+            jdbcTemplate.execute("TRUNCATE TABLE berth_swap_tide_snapshot");
+            jdbcTemplate.execute("TRUNCATE TABLE berth_swap_proposal");
             jdbcTemplate.execute("TRUNCATE TABLE berth_application");
             jdbcTemplate.execute("TRUNCATE TABLE tide_window");
             jdbcTemplate.execute("TRUNCATE TABLE berth_accepted_vessel_type");

@@ -18,6 +18,11 @@ public enum ErrorCode {
     /** 审批判断所依据的潮汐或申请数据在提交时已变化，判断结果失效 */
     JUDGMENT_STALE(409),
     DUPLICATE_BUSINESS_KEY(409),
+    SWAP_NOT_FOUND(404),
+    /** 互换双方为同一申请、或至少一方未批准 / 已取消 / 已开始作业，不能互换 */
+    SWAP_INVALID_PAIR(422),
+    /** 互换方案因改期/取消/潮汐资料更新等版本变化已失效，或确认的方案已终结 */
+    SWAP_STALE(409),
     INTERNAL_ERROR(500);
 
     private final int status;

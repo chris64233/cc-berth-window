@@ -67,4 +67,10 @@ public class ApplicationController {
         return DtoMapper.application(
                 service.reschedule(applicationNo, request.newEta(), request.newEtd()));
     }
+
+    /** 取消已批准且未开始作业的安排：释放泊位与拖轮占用，并使在途互换方案失效。 */
+    @PostMapping("/{applicationNo}/cancel")
+    public ApplicationResponse cancel(@PathVariable String applicationNo) {
+        return DtoMapper.application(service.cancel(applicationNo));
+    }
 }
